@@ -9,25 +9,9 @@
 
 ## 一、整体架构图
 
-本项目包含两条并行的自动化链路：**本地实时通知链路** 和 **CI/CD 智能审查链路**。
+本项目包含的自动化链路： **CI/CD 智能审查链路**。
 
-### 链路一：本地 Webhook 实时通知
-
-```
-本地开发者 git push
-      ↓
-GitHub 仓库
-      ↓ (触发 Webhook)
-POST 请求 (JSON数据)
-      ↓
-ngrok 隧道 (外网 → 内网穿透)
-      ↓
-本地 Flask 服务器 (step2.py, 端口5000)
-      ↓ (解析JSON，提取字段)
-终端打印 + 转发飞书机器人
-```
-
-### 链路二：GitHub Actions AI 代码审查（CI/CD）
+### GitHub Actions AI 代码审查（CI/CD）
 
 ```
 开发者 git push / 发起 Pull Request
@@ -47,73 +31,13 @@ notify_feishu.py：拼接飞书卡片（区分Push/PR样式，带按钮跳转日
 飞书收到结构化卡片通知
 ```
 
-两条链路的共同底层逻辑：**利用 Webhook / Actions 机制，把 GitHub 事件转化为可执行的后续动作，并最终以飞书通知的形式闭环。**
+底层逻辑：**利用 Actions 机制，把 GitHub 事件转化为可执行的后续动作，并最终以飞书通知的形式闭环。**
 
 ---
 
 ## 二、核心组件说明
 
-### 1. Flask 本地服务器 (step2.py)
-
-接收 HTTP POST 请求，解析 GitHub 事件类型和数据。
-
-```python
-from flask import Flask, request
-
-app = Flask(__name__)
-
-@app.route('/webhook', methods=['POST'])
-def receive_data():
-    event_type = request.headers.get('X-GitHub-Event')
-    data = request.json
-
-    print(f"收到了一个【{event_type}】类型的事件")
-
-    if event_type == 'ping':
-        print("这是GitHub发来的测试请求，说明连接成功了！")
-        return "pong收到，连接测试成功！"
-
-    if event_type == 'push':
-        repo_name = data['repository']['name']
-        pusher_name = data['pusher']['name']
-        commit_msg = data['head_commit']['message']
-        print(f"【{pusher_name}】在项目【{repo_name}】提交了：{commit_msg}")
-        return "推送事件处理完成！"
-
-    print("暂时还没处理这种类型的事件")
-    return "收到，但暂未处理"
-
-app.run(port=5000)
-```
-
-**关键点**：先判断 `X-GitHub-Event` 事件类型，再决定怎么解析 `request.json`，避免对不同结构的 payload 硬取值导致 KeyError。
-
----
-
-### 2. ngrok（内网穿透工具）
-
-```bash
-ngrok http 5000
-```
-
-运行后会显示一个 `https://xxxx.ngrok-free.dev` 的外网地址，映射到本地 5000 端口。
-
----
-
-### 3. GitHub Webhook 配置
-
-| 字段         | 填写内容                                       |
-| ------------ | ---------------------------------------------- |
-| Payload URL  | `https://你的ngrok地址.ngrok-free.dev/webhook` |
-| Content type | `application/json`                             |
-| 触发事件     | 先选 `Just the push event`                     |
-| Active       | 保持勾选                                       |
-
-⚠️ Webhook 是绑定在"具体某一个仓库"上的，不是全局生效。
-
----
-
-### 4. GitHub Actions 工作流 (.github/workflows/test.yml)
+### 1. GitHub Actions 工作流 (.github/workflows/test.yml)
 
 完整流程包含：拉取代码 → 装环境 → 装依赖 → 简单CI检查 → 生成diff（区分push/PR）→ AI审查 → 飞书通知。
 
@@ -166,7 +90,7 @@ ngrok http 5000
 
 ---
 
-### 5. code_review.py（AI 代码审查脚本 · 双人格模式）
+### 2. code_review.py（AI 代码审查脚本 · 双人格模式）
 
 **核心设计**：
 
@@ -187,7 +111,7 @@ def build_prompt(diff_content):
 
 ---
 
-### 6. notify_feishu.py（飞书通知脚本 · 卡片消息版）
+### 3. notify_feishu.py（飞书通知脚本 · 卡片消息版）
 
 **从纯文本升级为交互式卡片**，核心改进：
 
@@ -201,27 +125,23 @@ def build_prompt(diff_content):
 
 ## 三、踩过的坑 & 解决方案
 
-### 坑1：ngrok 免费版网址每次重启都会变
-
-每次重启后需去 GitHub Webhook 设置里手动更新 Payload URL；长期使用建议申请 ngrok 固定域名。
-
-### 坑2：GitHub 的 ping 事件 导致 500 报错
+### 坑1：GitHub 的 ping 事件 导致 500 报错
 
 `ping` 事件没有 `repository`/`pusher` 等字段，需先判断 `X-GitHub-Event` 再决定取值方式。**通用编程思维**：不能假设外部数据结构永远一致。
 
-### 坑3：在错误的仓库里 push，代码毫无反应
+### 坑2：在错误的仓库里 push，代码毫无反应
 
 Webhook 是仓库级别订阅，用 `git remote -v` 核对当前文件夹绑定的远程仓库是否匹配。
 
-### 坑4：Windows 本地生成的 diff 文件，Python 读取报 UnicodeDecodeError
+### 坑3：Windows 本地生成的 diff 文件，Python 读取报 UnicodeDecodeError
 
 PowerShell 的 `>` 重定向会把 UTF-8 转码成 UTF-16/GBK。解决：改用 `git diff --output=diff.txt` 绕开重定向，Python端二进制读取+BOM头检测自动判断编码。
 
-### 坑5：git diff 在 Actions 里因浅克隆而失败
+### 坑4：git diff 在 Actions 里因浅克隆而失败
 
 `actions/checkout` 默认浅克隆，需加 `fetch-depth: 0` 拉取完整历史。
 
-### 坑6：飞书消息看起来"每次都一样"
+### 坑5：飞书消息看起来"每次都一样"
 
 **现象**：飞书收到的CI通知除了状态外没有任何区分度信息，多次push看起来像重复消息。
 
@@ -229,7 +149,7 @@ PowerShell 的 `>` 重定向会把 UTF-8 转码成 UTF-16/GBK。解决：改用 
 
 **解决**：把 `curl` 换成 Python 脚本（`notify_feishu.py`），补充 commit 短哈希、提交信息/PR标题等字段，且 push 和 PR 展示不同内容。
 
-### 坑7：AI 审查结果没有真正发到飞书
+### 坑5：AI 审查结果没有真正发到飞书
 
 **现象**：飞书只收到了CI通过/失败的状态，`review_result.txt` 里辛辛苦苦生成的审查内容完全没被用上。
 
@@ -237,25 +157,25 @@ PowerShell 的 `>` 重定向会把 UTF-8 转码成 UTF-16/GBK。解决：改用 
 
 **解决**：`notify_feishu.py` 里新增 `read_review_result()`，读取文件内容并拼进消息体，同时做长度截断保护。
 
-### 坑8：飞书纯文本消息无法渲染 Markdown，DeepSeek 输出的 `##`、`**` 变成裸符号
+### 坑6：飞书纯文本消息无法渲染 Markdown，DeepSeek 输出的 `##`、`**` 变成裸符号
 
 **现象**：DeepSeek 审查结果里用了 `##` 标题、`**加粗**`，飞书 `text` 类型消息不支持渲染，导致这些符号原样显示，观感很差。
 
 **解决**：双管齐下——① Prompt 里明确要求"不要使用Markdown标题/列表语法"；② `notify_feishu.py` 把 `msg_type` 从 `text` 升级为 `interactive` 卡片消息，卡片内的 `markdown` 组件能正确渲染剩余的加粗语法。
 
-### 坑9：Prompt 里两套人格模板"输出格式要求"重复维护
+### 坑7：Prompt 里两套人格模板"输出格式要求"重复维护
 
 **现象**：`PROMPT_NORMAL` 和 `PROMPT_CATGIRL` 里格式规则几乎完全一样，写了两份，容易改一处忘另一处。
 
 **解决**：提取成 `OUTPUT_FORMAT_RULES` 公共常量，两个模板通过 `.format()` 引用同一份规则。
 
-### 坑10：diff 为空时返回中文提示字符串，可能误导 AI
+### 坑8：diff 为空时返回中文提示字符串，可能误导 AI
 
 **现象**：`read_diff_file` 找不到文件时返回类似"（未找到 diff 文件...）"的中文字符串，`main` 函数没做判断就直接拿去拼 Prompt，AI 可能把这段提示误当成代码内容来审查。
 
 **解决**：改为返回 `None`，`main` 函数判断 `None` 后直接跳过 API 调用，写入固定的"无差异"提示，顺便节省一次 API 调用。
 
-### 坑11：调试时把 temperature 手滑改高，输出变得不稳定
+### 坑9：调试时把 temperature 手滑改高，输出变得不稳定
 
 审查任务追求的是稳定、严谨，`temperature` 曾一度被改到 `0.7`（更适合创意写作场景），导致输出风格波动较大。改回 `0.3` 后审查结论明显更一致。
 
@@ -264,21 +184,12 @@ PowerShell 的 `>` 重定向会把 UTF-8 转码成 UTF-16/GBK。解决：改用 
 ## 四、调试排查技巧
 
 1. **GitHub 端**：Webhook详情页 "Recent Deliveries" 查看每次投递记录，支持 Redeliver 重新发送
-2. **本地端**：Flask 终端实时打印请求日志和自定义 `print()` 信息
-3. **Actions 端**：仓库 "Actions" 标签页逐 step 查看日志，能看到 diff 内容、DeepSeek 原始返回
-4. **飞书调试**：`notify_feishu.py` 打印 `resp.status_code` 和 `resp.text`，飞书接口报错信息通常直接说明原因
+2. **Actions 端**：仓库 "Actions" 标签页逐 step 查看日志，能看到 diff 内容、DeepSeek 原始返回
+3. **飞书调试**：`notify_feishu.py` 打印 `resp.status_code` 和 `resp.text`，飞书接口报错信息通常直接说明原因
 
 ---
 
 ## 五、当前已实现的功能清单
-
-**本地 Webhook 通知链路**
-
-- [x] Flask 服务器接收 HTTP POST 请求
-- [x] ngrok 内网穿透
-- [x] GitHub Webhook 正确配置
-- [x] 正确处理 ping / push 事件
-- [x] 转发飞书机器人
 
 **CI/CD AI 代码审查链路**
 
@@ -304,8 +215,7 @@ PowerShell 的 `>` 重定向会把 UTF-8 转码成 UTF-16/GBK。解决：改用 
 3. **人格模式扩展**：`PERSONA_MAP` 字典化后新增人格成本很低，可以考虑"严厉学长"、"毒舌吐槽"等更多模式
 4. **审查跳过机制**：commit信息或PR标题包含 `[skip-review]` 时跳过AI审查，应对纯文档改动等不需要审查的场景
 5. **diff 大小上限控制**：超大 diff 可能导致 API 调用成本过高或超出上下文限制，需要加保护（比如超过阈值时只审查关键文件，或提示"改动过大建议拆分PR"）
-6. **两条链路整合**：Webhook实时通知（本地）和 Actions审查（云端）目前相对独立，未来可考虑统一到同一套飞书消息模板下
-7. **发布前的清理工作**（详见下方"七、发布准备清单"）
+6. **发布前的清理工作**（详见下方"七、发布准备清单"）
 
 ---
 
@@ -338,8 +248,6 @@ PowerShell 的 `>` 重定向会把 UTF-8 转码成 UTF-16/GBK。解决：改用 
 | 术语              | 含义                                                                  |
 | ----------------- | --------------------------------------------------------------------- |
 | Webhook           | 事件发生时自动向指定网址发送 HTTP 请求的机制                          |
-| ngrok             | 内网穿透工具，映射本地服务到公网地址                                  |
-| Flask             | Python 轻量级 Web 框架                                                |
 | Payload           | Webhook 请求携带的 JSON 数据内容                                      |
 | ping / push 事件  | GitHub Webhook 的连接测试事件 / 代码推送事件                          |
 | Recent Deliveries | Webhook 详情页的历史投递记录                                          |
